@@ -1,14 +1,13 @@
 package ascii
 import "core:encoding/json"
 import "core:fmt"
-import "core:math/linalg/hlsl"
 import "core:mem"
 import "core:os"
-import "core:slice"
+import "core:reflect"
 import "core:strings"
 import "vendor:raylib"
-BUFFER_HEIGHT :: 45
-BUFFER_WIDTH :: 80
+BUFFER_HEIGHT :: 47
+BUFFER_WIDTH :: 120
 
 color_t :: enum (u8) {
 	BLACK,
@@ -65,17 +64,20 @@ LineStruct :: struct {
 
 BufferSavestate :: struct {
 	lines:  [dynamic]LineStruct,
-	buffer: [60][80]Cell,
+	buffer: [BUFFER_HEIGHT][BUFFER_WIDTH]Cell,
 }
 
 BufferState :: struct {
 	lines:  map[Line]LineKind,
-	buffer: [60][80]Cell,
+	buffer: [BUFFER_HEIGHT][BUFFER_WIDTH]Cell,
 }
+
 
 Editor :: struct {
 	file_name:          string,
 	mode:               EditorMode,
+	shift_x:            i32,
+	shift_y:            i32,
 	cursor_x:           i16,
 	cursor_y:           i16,
 	select_start_x:     i16,
@@ -152,11 +154,14 @@ get_color :: proc(color: color_t, bg := false) -> (out: raylib.Color) {
 	return
 }
 
-drawing_to_screen_space :: proc(x: i16, y: i16, cell_size: i16) -> raylib.Vector2 {
+drawing_to_screen_space :: proc(this: ^Editor, x: i16, y: i16, cell_size: i16) -> raylib.Vector2 {
 	x0 := cast(int)x
 	y0 := cast(int)y
 	cell := cast(int)cell_size
-	out := raylib.Vector2{cast(f32)(x0 * cell + cell / 2), cast(f32)(y0 * cell + cell / 2)}
+	out := raylib.Vector2 {
+		cast(f32)(x0 * cell + cell / 2 + cast(int)this.shift_x),
+		cast(f32)(y0 * cell + cell / 2 + cast(int)this.shift_y),
+	}
 	return out
 }
 
@@ -176,6 +181,9 @@ canonicalize_line :: proc(line: Line) -> (out: Line) {
 	return
 }
 
+@(rodata)
+FONT_BYTES := #load("Ac437_IBM_VGA_9x16.ttf")
+
 editor :: proc() {
 	frame_buffer := make_slice([]u8, 65536)
 	this := new(Editor)
@@ -193,13 +201,57 @@ editor :: proc() {
 		delete(frame_buffer)
 		free(this)
 	}
+	cell_size: i16 = 10
+	cell_width: i16 = cell_size
+	cell_height: i16 = cell_size * 2
 	raylib.InitWindow(1200, 1000, "ed(1)")
+	raylib.SetTargetFPS(61)
 	defer {
 		raylib.CloseWindow()
 	}
+	{
+		for !raylib.IsWindowReady() {
+			raylib.BeginDrawing()
+			raylib.ClearBackground(raylib.BLACK)
+			raylib.EndDrawing()
+		}
+		{
+			raylib.BeginDrawing()
+			raylib.ClearBackground(raylib.BLACK)
+			raylib.EndDrawing()
+		}
+		height := (raylib.GetMonitorHeight(0) * 9) / 10
+		width := (raylib.GetMonitorWidth(0) * 9) / 10
+		raylib.SetWindowSize(width, height)
+		raylib.SetWindowPosition(0, 0)
+		cell_size = cast(i16)((height) / ((BUFFER_HEIGHT + 1) * 2))
+		cell_height = cell_size * 2
+		cell_width = cell_size
+		buffer_width := cast(i32)(BUFFER_WIDTH * cell_size)
+		buffer_height := cast(i32)(BUFFER_HEIGHT * cell_height)
+		this.shift_x = (width - buffer_width) / 2
+		this.shift_y = (height - buffer_height) / 2
+		fmt.printf(
+			"cell size:%d buffer_width:%d, buffer_height:%d, shift_x:%d shift_y:%d, width:%d, height:%d\n",
+			cell_size,
+			buffer_width,
+			buffer_height,
+			this.shift_x,
+			this.shift_y,
+			width,
+			height,
+		)
+	}
 	raylib.SetTraceLogLevel(.ERROR)
 	raylib.SetExitKey(.KEY_NULL)
-	font := raylib.LoadFont("Ac437_IBM_VGA_9x16.ttf")
+	font := raylib.LoadFontFromMemory(
+		".ttf",
+		&FONT_BYTES[0],
+		cast(i32)len(FONT_BYTES),
+		cast(i32)cell_height,
+		nil,
+		0,
+	)
 	defer raylib.UnloadFont(font)
 	for !this.should_quit && !raylib.WindowShouldClose() {
 		if this.move_timer > 0. {
@@ -208,10 +260,11 @@ editor :: proc() {
 				this.move_timer = 0.
 			}
 		}
+
 		mem.arena_free_all(&this.frame_arena)
 		switch this.mode {
 		case .Normal:
-			editor_update_normal(this)
+			editor_update_normal(this, cast(i32)cell_size)
 		case .Visual:
 			editor_update_visual(this)
 		case .Text:
@@ -229,21 +282,26 @@ editor :: proc() {
 		} else {
 			this.cursor_y = clamp(this.cursor_y, 0, (BUFFER_HEIGHT) * 2 - 1)
 		}
-		cell_size: i16 = 10
-		cell_width: i16 = cell_size
-		cell_height: i16 = cell_size * 2
+
 		raylib.BeginDrawing()
 		raylib.ClearBackground(get_color(this.background_color, true))
+		raylib.DrawRectangleLines(
+			this.shift_x - 1,
+			this.shift_y - 1,
+			cast(i32)(BUFFER_WIDTH * cell_width) + 2,
+			cast(i32)(BUFFER_HEIGHT * cell_height) + 2,
+			raylib.GREEN,
+		)
 		for line, kind in this.state.lines {
 			point := line.start
 			point2 := line.end
 			if kind == .Wall {
-				s0 := drawing_to_screen_space(point.x, point.y, cell_size)
-				s1 := drawing_to_screen_space(point2.x, point2.y, cell_size)
+				s0 := drawing_to_screen_space(this, point.x, point.y, cell_size)
+				s1 := drawing_to_screen_space(this, point2.x, point2.y, cell_size)
 				raylib.DrawLineV(s0, s1, get_color(this.text_color))
 			} else if kind == .Door {
-				s0 := drawing_to_screen_space(point.x, point.y, cell_size)
-				s1 := drawing_to_screen_space(point2.x, point2.y, cell_size)
+				s0 := drawing_to_screen_space(this, point.x, point.y, cell_size)
+				s1 := drawing_to_screen_space(this, point2.x, point2.y, cell_size)
 				m0 := (s0 + s1) / 2
 				e0 := (s0 * 0.6 + m0 * 0.4)
 				e1 := (s1 * 0.6 + m0 * 0.4)
@@ -253,8 +311,8 @@ editor :: proc() {
 		}
 		for y in 0 ..< len(this.buffer) {
 			for x in 0 ..< len(this.buffer[0]) {
-				px := cast(i32)x * cast(i32)cell_width
-				py := cast(i32)y * cast(i32)cell_height
+				px := cast(i32)x * cast(i32)cell_width + this.shift_x
+				py := cast(i32)y * cast(i32)cell_height + this.shift_y
 				ch := cast(i32)cell_height
 				if this.buffer[y][x].ch != cast(rune)0 &&
 				   !(strings.is_space(this.buffer[y][x].ch)) {
@@ -277,8 +335,11 @@ editor :: proc() {
 				{
 					cast(f32)this.cursor_x * cast(f32)cell_size +
 					cast(f32)cell_size / 2 -
-					0.2 * cast(f32)(cell_size),
-					cast(f32)this.cursor_y * cast(f32)cell_size - cast(f32)cell_size * 0.15,
+					0.2 * cast(f32)(cell_size) +
+					cast(f32)this.shift_x,
+					cast(f32)this.cursor_y * cast(f32)cell_size -
+					cast(f32)cell_size * 0.15 +
+					cast(f32)this.shift_y,
 				},
 				0.5 * cast(f32)(cell_height),
 				raylib.RED,
@@ -288,8 +349,8 @@ editor :: proc() {
 				font,
 				'|',
 				{
-					cast(f32)this.cursor_x * cast(f32)cell_width,
-					cast(f32)this.cursor_y * cast(f32)cell_height,
+					cast(f32)this.cursor_x * cast(f32)cell_width + cast(f32)this.shift_x,
+					cast(f32)this.cursor_y * cast(f32)cell_height + cast(f32)this.shift_y,
 				},
 				0.8 * cast(f32)(cell_height),
 				raylib.GREEN,
@@ -329,6 +390,19 @@ editor :: proc() {
 	editor_save_file(this, this.file_name)
 }
 
+check_keys_pressed :: proc(this: ^Editor, keys: []raylib.KeyboardKey) -> bool {
+	for i in keys {
+		if raylib.IsKeyPressed(i) || raylib.IsKeyDown(i) && this.move_timer <= 0. {
+			if raylib.IsKeyPressed(i) {
+				this.move_timer = 0.1
+			} else {
+				this.move_timer = 0.05
+			}
+			return true
+		}
+	}
+	return false
+}
 slutty_parse_partial_vim_keybind_inputs :: proc(
 	this: ^Editor,
 	base_x: i16,
@@ -338,15 +412,6 @@ slutty_parse_partial_vim_keybind_inputs :: proc(
 	x: i16,
 	y: i16,
 ) {
-	check_keys_pressed :: proc(this: ^Editor, keys: []raylib.KeyboardKey) -> bool {
-		for i in keys {
-			if raylib.IsKeyPressed(i) || raylib.IsKeyDown(i) && this.move_timer <= 0. {
-				this.move_timer = 0.18
-				return true
-			}
-		}
-		return false
-	}
 	x = base_x
 	y = base_y
 	if drawing {
@@ -518,13 +583,26 @@ slutty_parse_partial_vim_keybind_inputs :: proc(
 	return
 }
 
-editor_update_normal :: proc(this: ^Editor) {
+editor_update_normal :: proc(this: ^Editor, cell_size: i32) {
 	x, y := slutty_parse_partial_vim_keybind_inputs(this, this.cursor_x, this.cursor_y, false)
 	this.cursor_x = x
 	this.cursor_y = y
+	if raylib.IsMouseButtonPressed(.LEFT) {
+		cx := (raylib.GetMouseX() - this.shift_x) / cell_size
+		cy := (raylib.GetMouseY() - this.shift_y) / (cell_size * 2)
+		if (cx >= 0 && cx < BUFFER_WIDTH) && (cy > 0 && cy < BUFFER_HEIGHT) {
+			this.cursor_x = cast(i16)cx
+			this.cursor_y = cast(i16)cy
+		}
+	}
 	if raylib.IsKeyPressed(.I) {
 		this.mode = .Text
-		this.carriage_return = this.cursor_x
+		if !(raylib.IsKeyDown(.LEFT_SHIFT) || raylib.IsKeyDown(.RIGHT_SHIFT)) {
+			this.carriage_return = this.cursor_x
+		} else {
+			this.carriage_return = 0
+		}
+
 	} else if raylib.IsKeyPressed(.A) {
 		this.cursor_x += 1
 		if this.cursor_x > BUFFER_WIDTH - 1 {
@@ -532,6 +610,7 @@ editor_update_normal :: proc(this: ^Editor) {
 			this.cursor_y += 1
 			this.cursor_y = clamp(this.cursor_y, 0, BUFFER_HEIGHT - 1)
 		}
+		this.carriage_return = 0
 	} else if raylib.IsKeyPressed(.D) {
 		if !(raylib.IsKeyDown(.LEFT_SHIFT) || raylib.IsKeyDown(.RIGHT_SHIFT)) {
 			this.cursor_y *= 2
@@ -541,6 +620,8 @@ editor_update_normal :: proc(this: ^Editor) {
 			this.cursor_y *= 2
 			this.mode = .Drawing
 		}
+	} else if raylib.IsKeyPressed(.X) {
+		this.buffer[this.cursor_y][this.cursor_x] = {}
 	} else if raylib.IsKeyPressed(.SEMICOLON) && raylib.IsKeyDown(.LEFT_SHIFT) {
 		this.mode = .Command
 	} else if raylib.IsKeyPressed(.O) {
@@ -605,6 +686,19 @@ editor_update_visual :: proc(this: ^Editor) {
 }
 
 editor_update_text :: proc(this: ^Editor) {
+	if check_keys_pressed(this, {.UP}) {
+		this.cursor_y -= 1
+		return
+	} else if check_keys_pressed(this, {.DOWN}) {
+		this.cursor_y += 1
+		return
+	} else if check_keys_pressed(this, {.LEFT}) {
+		this.cursor_x -= 1
+		return
+	} else if check_keys_pressed(this, {.RIGHT}) {
+		this.cursor_x += 1
+		return
+	}
 	if raylib.IsKeyPressed(.ESCAPE) {
 		this.mode = .Normal
 	} else if raylib.IsKeyPressed(.ENTER) || raylib.IsKeyPressedRepeat(.ENTER) {
@@ -698,6 +792,11 @@ editor_update_command :: proc(this: ^Editor) {
 		strings.builder_reset(&this.command_buffer)
 		editor_exec_command(this, cmd)
 		this.mode = .Normal
+	} else if raylib.IsKeyPressed(.BACKSPACE) ||
+	   raylib.IsKeyPressed(.DELETE) ||
+	   raylib.IsKeyPressedRepeat(.BACKSPACE) ||
+	   raylib.IsKeyPressedRepeat(.DELETE) {
+		strings.pop_rune(&this.command_buffer)
 	} else {
 		rn := raylib.GetCharPressed()
 		if rn != 0 {
@@ -708,7 +807,9 @@ editor_update_command :: proc(this: ^Editor) {
 
 
 editor_exec_command :: proc(this: ^Editor, cmd: string) {
-	split, err := strings.split_after(cmd, " ", this.frame_allocator)
+	cmd := strings.trim_space(cmd)
+	split, err := strings.split(cmd, " ")
+	defer delete(split)
 	if err != nil {
 		return
 	}
@@ -723,9 +824,27 @@ editor_exec_command :: proc(this: ^Editor, cmd: string) {
 		editor_save_file(this, this.file_name)
 		this.should_quit = true
 	case "e":
-		if len(cmd_base) == 2 {
+		if len(split) > 1 {
 			editor_save_file(this, this.file_name)
 			editor_load_file(this, split[1])
+		}
+	case "col":
+		fallthrough
+	case "color":
+		{
+			if len(split) > 1 {
+				to_upper := strings.to_upper(split[1])
+				defer delete(to_upper)
+				col, ok := reflect.enum_from_name(color_t, to_upper)
+				if ok {
+					fmt.printf("%v\n", col)
+					this.text_color = col
+				} else {
+					fmt.printf("could not parse color:%s\n", to_upper)
+				}
+			} else {
+				this.text_color = .GREEN
+			}
 		}
 	case:
 		if cmd_base in this.plugin_command_set {
@@ -762,6 +881,7 @@ editor_load_file :: proc(this: ^Editor, file: string) {
 	this.file_name = strings.clone(file)
 	buffer, err := os.read_entire_file(file, context.allocator)
 	if err != nil {
+		fmt.printf("ERROR READING FILE FILE:%v\n", err)
 		this.lines = make(map[Line]LineKind)
 		return
 	}
@@ -778,4 +898,5 @@ editor_load_file :: proc(this: ^Editor, file: string) {
 	for i in new_state.lines {
 		this.lines[canonicalize_line(i.line)] = i.kind
 	}
+	fmt.printf("editing file:%s\n", file)
 }
