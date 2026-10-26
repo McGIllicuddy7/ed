@@ -266,13 +266,13 @@ editor :: proc() {
 		case .Normal:
 			editor_update_normal(this, cast(i32)cell_size)
 		case .Visual:
-			editor_update_visual(this)
+			editor_update_visual(this, cast(i32)cell_size)
 		case .Text:
-			editor_update_text(this)
+			editor_update_text(this, cast(i32)cell_size)
 		case .Drawing:
-			editor_update_drawing(this)
+			editor_update_drawing(this, cast(i32)cell_size)
 		case .Command:
-			editor_update_command(this)
+			editor_update_command(this, cast(i32)cell_size)
 		}
 		this.cursor_x = clamp(this.cursor_x, 0, BUFFER_WIDTH - 1)
 		this.carriage_return = clamp(this.carriage_return, 0, BUFFER_WIDTH - 1)
@@ -594,6 +594,7 @@ editor_update_normal :: proc(this: ^Editor, cell_size: i32) {
 			this.cursor_x = cast(i16)cx
 			this.cursor_y = cast(i16)cy
 		}
+		return
 	}
 	if raylib.IsKeyPressed(.I) {
 		this.mode = .Text
@@ -657,7 +658,7 @@ editor_update_normal :: proc(this: ^Editor, cell_size: i32) {
 	}
 }
 
-editor_update_visual :: proc(this: ^Editor) {
+editor_update_visual :: proc(this: ^Editor, cell_size: i32) {
 	if raylib.IsKeyPressed(.ESCAPE) {
 		this.mode = .Normal
 		return
@@ -685,7 +686,19 @@ editor_update_visual :: proc(this: ^Editor) {
 	}
 }
 
-editor_update_text :: proc(this: ^Editor) {
+editor_update_text :: proc(this: ^Editor, cell_size: i32) {
+	if raylib.IsMouseButtonPressed(.LEFT) {
+		cx := (raylib.GetMouseX() - this.shift_x) / cell_size
+		cy := (raylib.GetMouseY() - this.shift_y) / (cell_size * 2)
+		if (cx >= 0 && cx < BUFFER_WIDTH) && (cy > 0 && cy < BUFFER_HEIGHT) {
+			this.cursor_x = cast(i16)cx
+			if this.cursor_x < this.carriage_return {
+				this.carriage_return = this.cursor_x
+			}
+			this.cursor_y = cast(i16)cy
+		}
+		return
+	}
 	if check_keys_pressed(this, {.UP}) {
 		this.cursor_y -= 1
 		return
@@ -699,7 +712,18 @@ editor_update_text :: proc(this: ^Editor) {
 		this.cursor_x += 1
 		return
 	}
-	if raylib.IsKeyPressed(.ESCAPE) {
+	if raylib.IsKeyPressed(.TAB) {
+		for i in 0 ..< 3 {
+			this.buffer[this.cursor_y][this.cursor_x] = {}
+			this.cursor_x += 1
+			if this.cursor_x > BUFFER_WIDTH - 1 {
+				this.cursor_x = this.carriage_return
+				this.cursor_y += 1
+				break
+			}
+		}
+
+	} else if raylib.IsKeyPressed(.ESCAPE) {
 		this.mode = .Normal
 	} else if raylib.IsKeyPressed(.ENTER) || raylib.IsKeyPressedRepeat(.ENTER) {
 		this.last_return_x = this.cursor_x
@@ -738,10 +762,19 @@ editor_update_text :: proc(this: ^Editor) {
 	}
 }
 
-editor_update_drawing :: proc(this: ^Editor) {
+editor_update_drawing :: proc(this: ^Editor, cell_size: i32) {
 	base_x := this.cursor_x
 	base_y := this.cursor_y
 	x, y := slutty_parse_partial_vim_keybind_inputs(this, this.cursor_x, this.cursor_y, true)
+	if raylib.IsMouseButtonPressed(.LEFT) {
+		cx := (raylib.GetMouseX() - this.shift_x) / cell_size
+		cy := (raylib.GetMouseY() - this.shift_y) / (cell_size)
+		if (cx >= 0 && cx < BUFFER_WIDTH) && (cy > 0 && cy < BUFFER_HEIGHT * 2) {
+			this.cursor_x = cast(i16)cx
+			this.cursor_y = cast(i16)cy
+		}
+		return
+	}
 	if raylib.IsKeyPressed(.ESCAPE) {
 		this.cursor_y /= 2
 		this.mode = .Normal
@@ -783,7 +816,7 @@ editor_update_drawing :: proc(this: ^Editor) {
 	}
 }
 
-editor_update_command :: proc(this: ^Editor) {
+editor_update_command :: proc(this: ^Editor, cell_size: i32) {
 	if raylib.IsKeyPressed(.ESCAPE) {
 		strings.builder_reset(&this.command_buffer)
 		this.mode = .Normal
